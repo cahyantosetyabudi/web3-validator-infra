@@ -1,0 +1,104 @@
+# Ethereum execution + consensus client pair on Sepolia testnet.
+# Engine API (port 8551) is authenticated via shared JWT; never exposed publicly.
+services:
+  geth:
+    image: ethereum/client-go:stable
+    container_name: geth-sepolia
+    restart: unless-stopped
+    # Sepolia chain + Engine API for the consensus client + metrics for Prometheus
+    command:
+      - --sepolia
+      - --http
+      - --http.addr=0.0.0.0
+      - --http.api=eth,net,web3
+      - --http.corsdomain=*
+      - --authrpc.addr=0.0.0.0
+      - --authrpc.vhosts=*
+      - --authrpc.jwtsecret=/secrets/jwt.hex
+      - --cache=2048
+      - --metrics
+      - --metrics.addr=0.0.0.0
+    volumes:
+      - geth-data:/root/.ethereum
+      - ./secrets:/secrets:ro
+    ports:
+      - "30303:30303"     # execution p2p
+      - "30303:30303/udp"
+      - "127.0.0.1:8545:8545"   # JSON-RPC, localhost only
+      - "127.0.0.1:8551:8551"   # Engine API, localhost only
+      - "127.0.0.1:6060:6060"   # metrics, localhost only
+    stop_grace_period: 5m   # let geth flush cleanly on restart
+
+  lighthouse:
+    image: sigp/lighthouse:latest
+    container_name: lighthouse-sepolia
+    restart: unless-stopped
+    # Beacon node. NOTE (2026-10-08): public checkpoint-sync endpoints serve a
+    # Gloas-fork finalized state that Lighthouse v8.2.3 (latest) cannot parse
+    # (InvalidSsz). Until that is fixed upstream, we backfill from genesis with
+    # --allow-insecure-genesis-sync — acceptable for a Sepolia *testnet*
+    # learning node (weak subjectivity only matters when securing real stake).
+    # Re-enable trustless fast sync via --checkpoint-sync-url once upstream
+    # handles Gloas checkpoint states.
+    command:
+      - lighthouse
+      - bn
+      - --network=sepolia
+      - --allow-insecure-genesis-sync
+      - --ignore-ws-check
+      - --execution-endpoint=http://geth:8551
+      - --execution-jwt=/secrets/jwt.hex
+      - --disable-upnp
+      - --metrics
+      - --metrics-address=0.0.0.0
+      - --validator-monitor-auto
+    volumes:
+      - lighthouse-data:/root/.lighthouse
+      - ./secrets:/secrets:ro
+    ports:
+      - "9000:9000"       # consensus p2p
+      - "9000:9000/udp"
+      - "127.0.0.1:5052:5052"   # beacon API, localhost only
+      - "127.0.0.1:5054:5054"   # metrics, localhost only
+    depends_on:
+      - geth
+    stop_grace_period: 5m
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=30d
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      - geth
+      - lighthouse
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-changeme}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  geth-data:
+  lighthouse-data:
+  prometheus-data:
+  grafana-data:
